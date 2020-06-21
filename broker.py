@@ -8,6 +8,10 @@ import time
 import threading
 import pickle
 
+
+from postman import Postman
+
+
 class ReturnCodes:
     CONNECTION_ACCEPTED = 0X00
     BAD_PROTO_VERSION   = 0X01
@@ -49,14 +53,16 @@ class IDRejectedError(Exception):
 
 class Subscription:
 
-    def __init__(self, client, QoS):
+    def __init__(self, client, topic, QoS):
         self.client = client
-        self.QoS = QoS
+        self.topic  = topic
+        self.QoS    = QoS
 
 class MQTTClient:
 
     def __init__(self, id, keep_alive, flags, timeout_callback):
         self.id                    = id
+        self._connection           = None
         self._flags                = flags
         self._keep_alive           = keep_alive
         self._client_timed_out     = timeout_callback
@@ -72,20 +78,50 @@ class MQTTClient:
         self._stop_flag            = threading.Event()
 
 
+    def publish(self, packet):
+        try:
+            self._connection.send(packet)
+            print('PUBLIC SENT!')
+        except:
+            print('error')
+
+
+    def get_connection(self):
+        return self._connection
+
+    def get_flags(self):
+        return self._flags
+
+    def add_connection(self, connection):
+        self._connection = connection
+
+
+    def is_alive(self):
+        return self._connection is not None
+
+
     def add_subscription(self, topic, QoS):
-        self._subscriptions.append(Subscription(topic, QoS))
+        self._subscriptions.append(Subscription(self, topic, QoS))
+
+
+    def get_subscriptions(self):
+        return self._subscriptions
 
 
     def refresh_keep_alive(self):
         self.stop_session()
         self.start_session()
 
+
     def start_session(self):
         self._stop_flag.clear()
         threading.Thread(target=self._start_keep_alive_timer, daemon=True).start()
 
+
     def stop_session(self):
+        self._connection = None
         self._stop_flag.set()
+
 
     def _start_keep_alive_timer(self):
         t1 = time.time()
@@ -100,6 +136,7 @@ class MQTTClient:
         self._will_msg    = msg
         self._will_QoS    = QoS
         self._will_retain = True
+
 
 
 class MQTTBroker:
@@ -122,6 +159,8 @@ class MQTTBroker:
         self._sessions          = {}
         self._topics            = []
 
+        self._postman           = Postman(self._log)
+
         self._sock              = None
 
     def start(self):
@@ -136,42 +175,108 @@ class MQTTBroker:
                 con, addr = self._sock.accept()
                 print(addr)
                 self._log.info(f'New request from {addr[0]}')
-                self._handle_request(con, addr[0])
+                threading.Thread(target=self._handle_request, args=(con, addr[0])).start()
+                #self._handle_request(con, addr[0])
             
 
     def _handle_request(self, con, addr):
         try:
-            con.settimeout(.01)
+            con.settimeout(.1)
             data = con.recv(1024)
 
-            pkt_type  = self._get_packet_type(data)
-            pkt_len   = self._get_packet_len(data)
+            #pkt_type  = self._get_packet_type(data)
+            #pkt_len   = self._get_packet_len(data)
+            pkt_type, pkt_len = self._parse_header(data)
 
             if pkt_type == PacketType.CONNECT:
+                # connect, prepare new sessions?
                 client, session_present, return_code = self._parse_connect(data[2:], pkt_len)
                 self._send_connack(con, session_present, return_code)
+
+                # client OK, attach tcp-connection to session
+                client.add_connection(con)
+
                 if client:
                     self._log.info(f'New client connected from {addr} as {client.id}')
 
-                    data      = con.recv(1024)
-                    pkt_type  = self._get_packet_type(data)
-                    pkt_len   = self._get_packet_len(data)
+                    while client.is_alive():
+                        
+                        try:
+                            data      = con.recv(1024)
+                            #pkt_type  = self._get_packet_type(data)
+                            #pkt_len   = self._get_packet_len(data)
+                            pkt_type, pkt_len = self._parse_header(data)
 
-                    if pkt_type == PacketType.SUBSCRIBE:
-                        identifier, topic, QoS = self._parse_subscribe(data[2:], pkt_len)
-                        client.add_subscription(topic, QoS)
-                        self._log.info(f'New subscription added to client {client.id}.' + \
-                                       f'  Topic: {topic}  QoS: {QoS}')
-                        self._send_suback(con, identifier, QoS)
+                            if pkt_type == PacketType.SUBSCRIBE:
+                                identifier, topic, QoS = self._parse_subscribe(data[2:], pkt_len)
+                                client.add_subscription(topic, QoS)
+                                self._log.info(f'New subscription added to client {client.id}.' + \
+                                            f'  Topic: {topic}  QoS: {QoS}')
+                                self._send_suback(con, identifier, QoS)
 
+                            elif pkt_type == PacketType.UNSUBSCRIBE:
+                                self._parse_unsubscribe(data[2:], pkt_len)
 
-                    elif pkt_type == PacketType.UNSUBSCRIBE:
-                        self._parse_unsubscribe(data[2:], pkt_len)
-                    
+                            elif pkt_type == PacketType.PUBLISH:
+                                flags = self._get_pub_flags(data)
+                                topic, msg, identifier = self._parse_publish(data[2:],
+                                                            pkt_len, flags, client)
+                                self._log.info(f'Client {client.id} has published a message on topic \'{topic}\'' + \
+                                            f': \'{msg}\'')
+                                subscriptions = self._find_subscriptions(topic)
+                                self._postman.deliver(subscriptions, msg)
 
+                            else:
+                                print(pkt_type)
+                            
+                        except IndexError:
+                            pass
 
         except socket.timeout:
             print('socket timeout')
+
+    # find all subscriptions of the topic
+    def _find_subscriptions(self, topic):
+        subscriptions = []
+        for client in self._sessions.values():
+            for sub in client.get_subscriptions():
+                if topic == sub.topic:
+                    subscriptions.append(sub)
+                    break
+
+        return subscriptions
+
+
+    # returns the flags for a publish message: DUP, QoS, RETAIN
+    def _get_pub_flags(self, packet):
+        dup    = packet[0] & 0b00001000
+        QoS    = (packet[0] & 0b00000110) >> 1   # bit-shifted to map it to range 0-2
+        retain = packet[0] & 0b00000001
+        return {'dup': dup, 'qos': QoS, retain: 'retain'}
+
+
+    def _parse_publish(self, packet, msg_len, flags, client):
+
+        if flags['qos'] == 0 and flags['dup'] != 0:
+            raise Exception('DUP MUST BE 0 WHEN QoS is 0!!')
+
+        identifier = None
+
+        # get topic len (2 bytes) and the topic
+        topic_len = struct.unpack('>H', packet[:2])[0]
+        index     = 2 + topic_len
+        topic     = ''.join( [chr(byte) for byte in packet[2:index]] )
+
+        if flags['qos']:
+            # QoS > 0 needs packet identifier
+            identifier = struct.unpack('>H', packet[index:index + 2])
+            index += 2
+
+        # the message is the rest of the packet
+        msg       = packet[index: msg_len]
+        msg       = ''.join( [chr(byte) for byte in msg] )
+
+        return topic, msg, identifier
 
     
     def _parse_unsubscribe(self, packet, pkt_len):
@@ -281,7 +386,7 @@ class MQTTBroker:
         if client in self._sessions:
             self._sessions.pop(client.id)
 
-        
+
     def _parse_connect_payload(self, packet, flags, client):
         index = 0
 
@@ -302,11 +407,6 @@ class MQTTBroker:
         if flags['username']:
             self._authenticate(packet[index:])
 
-
-
-
-
-
     def _parse_connect_flags(self, _flags):
         flags = {}
         flags['username']      = _flags & (1 << 7)
@@ -318,9 +418,6 @@ class MQTTBroker:
         flags['clean_session'] = _flags & (1 << 1)
         flags['reserved']      = _flags & (1 << 0)
         return flags
-
-
-
 
     # TODO AUTHENTICATION
     def _authenticate(self, packet):
@@ -379,6 +476,13 @@ class MQTTBroker:
             with open(path, 'rb') as f:
                 return pickle.load(f)
         return {}
+
+
+    def _parse_header(self, packet):
+        pkt_type = packet[0] >> 4
+        pkt_len = self._get_packet_len(packet)
+        return pkt_type, pkt_len
+
 
     def _get_payload(self, packet):
         pass
