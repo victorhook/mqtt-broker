@@ -1,0 +1,2 @@
+class IDRejectedError(Exception):
+        pass

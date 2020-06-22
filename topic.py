@@ -1,8 +1,4 @@
-class Subscription:
 
-    def __init__(self, client, QoS):
-        self.client = client
-        self.QoS = QoS
 
 
 class Topic:
@@ -13,20 +9,25 @@ class Topic:
         self._children = []
         self._subscriptions = []
 
+
     def get_children(self):
         return self._children
+
 
     def add_subscription(self, subscription):
         self._children.append(child)        
 
+
     def add_child(self, child):
         self._children.append(child)
+
 
     def get_topics(self):
         topics = []
         for child in self._children:
             topics.append(f'{str(self)}/{self._find_children_recursive(child, "")}')
         return topics
+
 
     def _find_children_recursive(self, topic, topics):
         children = topic.get_children()
@@ -92,16 +93,40 @@ def create_new_topics(topic_string):
     return root
 
 
+class Subscription:
+
+    def __init__(self, client, topic, QoS):
+        self.client = client
+        self.topic  = topic
+        self.QoS    = QoS
+
+    def __eq__(self, other):
+        return self.topic == other
+
+    def __repr__(self):
+        return self.topic
+
+class A:
+    
+    def __init__(self):
+        self.subs = [Subscription('', 'home', 1), Subscription('', 'home/test', 1)]
+
+    def __iter__(self):
+        yield from self.subs
+
+
+a = A()
+print(a.subs)
+a.subs.remove('home')
+print(a.subs)
+
+
 if __name__ == "__main__":
    
-    home = create_new_topics('home/kitchen/test')
-    add_topics(home, 'toilet')
-    add_topics(home, 'hubert')
+    topics = 'home'
+    topics1 = 'home'
 
-    k1 = create_new_topics('lab/room1')
-    add_topics(k1, 'room2')
+    for i, k in list(zip(topics.split('/'), topics.split('/'))):
+        print(i, k)
 
-    topics1 = home.get_topics()
-    topics2 = k1.get_topics()
-    print(topics1)
-    print(topics2)
+

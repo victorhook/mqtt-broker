@@ -10,132 +10,10 @@ import pickle
 
 
 from postman import Postman
+from client import MQTTClient, Subscription
 
-
-class ReturnCodes:
-    CONNECTION_ACCEPTED = 0X00
-    BAD_PROTO_VERSION   = 0X01
-    BAD_ID              = 0X02
-    SERVER_UNAVAILABLE  = 0X03
-    BAD_USER_OR_PASS    = 0X04
-    NOT_AUTHORIZED      = 0X05
-
-## bits [7-4]
-class PacketType:
-    CONNECT     = 1
-    CONNACK     = 2
-    PUBLISH     = 3
-    PUBACK      = 4
-    PUBREC      = 5
-    PUBREL      = 6
-    PUBCOMP     = 7
-    SUBSCRIBE   = 8
-    SUBACK      = 9
-    UNSUBSCRIBE = 0xa2
-    UNSUBACK    = 11
-    PINGREQ     = 12
-    PINGRESP    = 13
-    DISCONNECT  = 14
-
-    CONNACK     = 32
-
-## bits [3-0]    3     2     1      0
-# PUBLISH     | DUP | QoS | QoS | RETAIN |
-# PUBREL      |  0  |  0  |  1  |   0    |
-# SUBSCRIBE   |  0  |  0  |  1  |   0    |
-# UNSUBSCRIBE |  0  |  0  |  1  |   0    |
-
-## bits [8-16]
-# Message length 
-
-class IDRejectedError(Exception):
-        pass
-
-class Subscription:
-
-    def __init__(self, client, topic, QoS):
-        self.client = client
-        self.topic  = topic
-        self.QoS    = QoS
-
-class MQTTClient:
-
-    def __init__(self, id, keep_alive, flags, timeout_callback):
-        self.id                    = id
-        self._connection           = None
-        self._flags                = flags
-        self._keep_alive           = keep_alive
-        self._client_timed_out     = timeout_callback
-        self._keep_alive_timer     = 0
-        self._subscriptions        = []
-        self._msgs_QoS_1_2_noack   = []
-        self._msgs_QoS_1_2_pending = []
-        self._msgs_QoS_2_noack     = []
-        self._will_QoS             = 0
-        self._will_topic           = None
-        self._will_msg             = None
-        self._will_retain          = False
-        self._stop_flag            = threading.Event()
-
-
-    def publish(self, packet):
-        try:
-            self._connection.send(packet)
-            print('PUBLIC SENT!')
-        except:
-            print('error')
-
-
-    def get_connection(self):
-        return self._connection
-
-    def get_flags(self):
-        return self._flags
-
-    def add_connection(self, connection):
-        self._connection = connection
-
-
-    def is_alive(self):
-        return self._connection is not None
-
-
-    def add_subscription(self, topic, QoS):
-        self._subscriptions.append(Subscription(self, topic, QoS))
-
-
-    def get_subscriptions(self):
-        return self._subscriptions
-
-
-    def refresh_keep_alive(self):
-        self.stop_session()
-        self.start_session()
-
-
-    def start_session(self):
-        self._stop_flag.clear()
-        threading.Thread(target=self._start_keep_alive_timer, daemon=True).start()
-
-
-    def stop_session(self):
-        self._connection = None
-        self._stop_flag.set()
-
-
-    def _start_keep_alive_timer(self):
-        t1 = time.time()
-        # if more than 1.5 times keep-alive has passed, the client must be disconnected
-        while not self._stop_flag.is_set() and time.time() - t1 < (self._keep_alive * 1.5):
-            pass
-
-        self._client_timed_out(self)
-
-    def add_will_msg(self, topic, msg, QoS):
-        self._will_topic  = topic
-        self._will_msg    = msg
-        self._will_QoS    = QoS
-        self._will_retain = True
+from utils.constants import PacketType, ReturnCodes
+from utils import errors
 
 
 
@@ -173,139 +51,188 @@ class MQTTBroker:
 
             while True:
                 con, addr = self._sock.accept()
-                print(addr)
+                print(f'IP: {addr[0]}  Port: {addr[1]}')
                 self._log.info(f'New request from {addr[0]}')
                 threading.Thread(target=self._handle_request, args=(con, addr[0])).start()
                 #self._handle_request(con, addr[0])
             
 
     def _handle_request(self, con, addr):
-        try:
-            con.settimeout(.1)
-            data = con.recv(1024)
+  
+        con.settimeout(.1)
+        data = con.recv(1024)
 
-            #pkt_type  = self._get_packet_type(data)
-            #pkt_len   = self._get_packet_len(data)
-            pkt_type, pkt_len = self._parse_header(data)
+        pkt_type, pkt_len = self._parse_header(data)
 
-            if pkt_type == PacketType.CONNECT:
-                # connect, prepare new sessions?
-                client, session_present, return_code = self._parse_connect(data[2:], pkt_len)
-                self._send_connack(con, session_present, return_code)
+        if pkt_type == PacketType.CONNECT:
+            # connect, prepare new sessions?
+            client, session_present, return_code = self._parse_connect(data[2:], pkt_len)
+            self._send_connack(con, session_present, return_code)
 
-                # client OK, attach tcp-connection to session
-                client.add_connection(con)
+            # client OK, attach tcp-connection to session
+            client.add_connection(con)
 
-                if client:
-                    self._log.info(f'New client connected from {addr} as {client.id}')
+            if client:
+                self._log.info(f'New client connected from {addr} as {client.id}')
 
-                    while client.is_alive():
-                        
-                        try:
-                            data      = con.recv(1024)
-                            #pkt_type  = self._get_packet_type(data)
-                            #pkt_len   = self._get_packet_len(data)
-                            pkt_type, pkt_len = self._parse_header(data)
+                while client.is_alive():
+                    
+                    try:
+                        data      = con.recv(1024)
+                        pkt_type, pkt_len = self._parse_header(data)
 
-                            if pkt_type == PacketType.SUBSCRIBE:
-                                identifier, topic, QoS = self._parse_subscribe(data[2:], pkt_len)
-                                client.add_subscription(topic, QoS)
-                                self._log.info(f'New subscription added to client {client.id}.' + \
+                        if pkt_type == PacketType.SUBSCRIBE:
+                            identifier, topic, QoS = self._parse_subscribe(data[2:], pkt_len)
+                            client.add_subscription(topic, QoS)
+                            self._log.info(f'New subscription added to client {client.id}.' + \
                                             f'  Topic: {topic}  QoS: {QoS}')
-                                self._send_suback(con, identifier, QoS)
+                            self._send_suback(con, identifier, QoS)
 
-                            elif pkt_type == PacketType.UNSUBSCRIBE:
-                                self._parse_unsubscribe(data[2:], pkt_len)
+                            if data[2 + pkt_len]:
+                                # more data in the packet!
+                                data = data[2 + pkt_len:]
+                                pkt_type = data[0]
+                                if pkt_type == PacketType.UNSUBSCRIBE:
 
-                            elif pkt_type == PacketType.PUBLISH:
-                                flags = self._get_pub_flags(data)
-                                topic, msg, identifier = self._parse_publish(data[2:],
-                                                            pkt_len, flags, client)
-                                self._log.info(f'Client {client.id} has published a message on topic \'{topic}\'' + \
-                                            f': \'{msg}\'')
-                                subscriptions = self._find_subscriptions(topic)
-                                self._postman.deliver(subscriptions, msg)
+                                    # according to docs, we must close connection if bits [3-0] is wrong
+                                    if pkt_type & 0x0f != 0b0010:
+                                        client.stop_session()
+                                        self._log.info(f'Bad packet format from client {client.id}, closing socket!')
+                                    
+                                    pkt_len = self._get_packet_len(data)
+                                    identifier, topic = self._parse_unsubscribe(data, pkt_len)
+                                    client.delete_topic(topic)
 
-                            else:
-                                print(pkt_type)
+                                    self._send_unsuback(con, identifier)
+
+                        elif pkt_type == PacketType.PUBLISH:
                             
-                        except IndexError:
-                            pass
+                            flags = self._get_pub_flags(data)
+                            topic, msg, identifier = self._parse_publish(data[2:],
+                                                        pkt_len, flags, client)
+                            self._log.info(f'Client {client.id} has published a message on topic' + \
+                                            f' {topic}: \'{msg}\'')
 
-        except socket.timeout:
-            print('socket timeout')
+
+                            # send the messages to all subscribers
+                            subscriptions = self._find_subscriptions(topic)
+                            self._postman.deliver(subscriptions, msg, flags)
+
+                            if flags['qos'] == 1:
+                                self._send_puback(con, identifier)
+
+                            elif flags['qos'] == 2:
+                                self._send_pubrec(con, identifier)
+                                data = con.recv(1024)
+                                pkt_type = data[0]
+                                if pkt_type == PacketType.PUBREL:
+                                    self._send_pubcomp(con, identifier)
+
+                            # sometimes the disconnect packet are inside the same tcp payload
+                            try:
+                                if data[-2] >> 4 == PacketType.DISCONNECT:
+                                    client.stop_session()
+                            except:
+                                # doesn't matter if this fails, nothing to do
+                                pass
+
+                        # the disconnect packets are usually packet in the same TCP-payload
+                        # as the PUBLISH packets, but this should detect just in case
+                        elif pkt_type == PacketType.DISCONNECT:
+                            client.stop_session()
+
+                        elif pkt_type == PacketType.PINGREQ:
+                            self._send_pingresp(con)
+                            threads = threading.enumerate()
+                            print(f'{len(threads)} threads running: {", ".join([t.name for t in threads])}')
+
+                        # UNSUB packet uses the RESERVED bits, which is why we need the whole byte
+                        elif data[0] == PacketType.UNSUBSCRIBE:
+                            # according to docs, we must close connection if bits [3-0] is wrong
+                            if data[0] & 0x0f != 0b0010:
+                                client.stop_session()
+                                self._log.info(f'Bad packet format from client {client.id}, closing socket!')
+                            
+                            pkt_len = self._get_packet_len(data)
+                            identifier, topic, msg = self._parse_unsubscribe(data, pkt_len)
+                            client.delete_topic(topic)
+
+                            self._send_unsuback(con, identifier)
+
+
+
+                        else:
+                            print(pkt_type)
+
+                    except IndexError:
+                        pass
+
+                    except socket.timeout:
+                        pass
+
+
+    def _send_pingresp(self, con):
+        con.send(bytearray([PacketType.PINGRESP, 0]))
 
     # find all subscriptions of the topic
     def _find_subscriptions(self, topic):
         subscriptions = []
         for client in self._sessions.values():
             for sub in client.get_subscriptions():
-                if topic == sub.topic:
+
+                match = True
+
+                topics = topic.split('/')
+                sub_topics = sub.topic.split('/')
+
+                if len(sub_topics) != len(topics) and sub_topics[-1] != '#':
+                    match = False
+                else:
+                    for t1, t2 in list(zip(sub_topics, topics)):
+                        if t1 == '+':
+                            print('found +!')
+                            continue
+                        elif t1 == '#':
+                            break
+                        elif t1 != t2:
+                            match = False
+                            break
+
+                        prev = t1
+
+                if match:
                     subscriptions.append(sub)
-                    break
 
         return subscriptions
 
 
-    # returns the flags for a publish message: DUP, QoS, RETAIN
-    def _get_pub_flags(self, packet):
-        dup    = packet[0] & 0b00001000
-        QoS    = (packet[0] & 0b00000110) >> 1   # bit-shifted to map it to range 0-2
-        retain = packet[0] & 0b00000001
-        return {'dup': dup, 'qos': QoS, retain: 'retain'}
+    # helper method for the generic ACK-messages
+    def __send_generic(self, con, pkt_type, identifier):
+        packet = bytearray([pkt_type, 2])
+        packet += struct.pack('>H', identifier)
+        con.send(packet)
 
+    def _send_unsuback(self, con, identifier):
+        self.__send_generic(con, PacketType.UNSUBACK, identifier)
 
-    def _parse_publish(self, packet, msg_len, flags, client):
+    def _send_pubcomp(self, con, identifier):
+        self.__send_generic(con, PacketType.PUBCOMP, identifier)
 
-        if flags['qos'] == 0 and flags['dup'] != 0:
-            raise Exception('DUP MUST BE 0 WHEN QoS is 0!!')
+    def _send_pubrec(self, con, identifier):
+        self.__send_generic(con, PacketType.PUBREC, identifier)
 
-        identifier = None
+    def _send_puback(self, con, identifier):
+        self.__send_generic(con, PacketType.PUBACK, identifier)
 
-        # get topic len (2 bytes) and the topic
-        topic_len = struct.unpack('>H', packet[:2])[0]
-        index     = 2 + topic_len
-        topic     = ''.join( [chr(byte) for byte in packet[2:index]] )
-
-        if flags['qos']:
-            # QoS > 0 needs packet identifier
-            identifier = struct.unpack('>H', packet[index:index + 2])
-            index += 2
-
-        # the message is the rest of the packet
-        msg       = packet[index: msg_len]
-        msg       = ''.join( [chr(byte) for byte in msg] )
-
-        return topic, msg, identifier
-
-    
-    def _parse_unsubscribe(self, packet, pkt_len):
-        identifier = struct.unpack('>H', packet[:2])[0]
-        topic_len = struct.unpack('>H', packet[2:4])[0]
-        topic     = ''.join( [chr(byte) for byte in packet[4:4 + topic_len]] )
-        print('Unsubscribing from toping %s' % topic)
-
-
-    def _parse_subscribe(self, packet, pkt_len):
-        identifier = struct.unpack('>H', packet[:2])[0]
-        # topic len 2 bytes
-        topic_len = struct.unpack('>H', packet[2:4])[0]
-        topic     = ''.join( [chr(byte) for byte in packet[4:4 + topic_len]] )
-        QoS       = packet[-1]
-
-        return identifier, topic, QoS
-
-
-    def _send_suback(self, connection, identifier, QoS):
+    def _send_suback(self, con, identifier, QoS):
         packet = bytearray([PacketType.SUBACK << 4, 0x03])
         packet += struct.pack('>H', identifier)
         packet.append(QoS)
-        print([byte for byte in packet])
-        connection.send(packet)
+        con.send(packet)
 
-    def _send_connack(self, connection, session_present, return_code):
+    def _send_connack(self, con, session_present, return_code):
         packet = bytearray([PacketType.CONNACK, 0x02, session_present, return_code])
-        connection.send(packet)
+        con.send(packet)
         
     def _parse_connect(self, packet, pkt_len):
         # get length of the protocol name
@@ -322,7 +249,7 @@ class MQTTBroker:
             # bad protocol version!
             return None, 0, ReturnCodes.BAD_PROTO_VERSION
 
-        # parse the connection flags
+        # parse the con flags
         flags = self._parse_connect_flags(packet[3 + proto_len])
 
         if flags['reserved']:
@@ -335,14 +262,14 @@ class MQTTBroker:
         client_id_len = struct.unpack('>H', packet[6 + proto_len:8 + proto_len])[0]
 
         if not client_id_len:
-            raise IDRejectedError('ID of 0 is not supported')
+            raise errors.IDRejectedError('ID of 0 is not supported')
 
         client_id = packet[8 + proto_len: 8 + proto_len + client_id_len]
         client_id = ''.join([chr(b) for b in client_id])
 
         if client_id in self._connected_clients:
             # client already connected, we must disconnect the existing client!
-            raise ConnectionRefusedError('Client already connected')
+            raise conRefusedError('Client already connected')
 
         
         # this bit is used in the CONNACK response
@@ -365,20 +292,69 @@ class MQTTBroker:
         # parse packet payload, and attach it (if needed) to the client session
         self._parse_connect_payload(packet[8 + proto_len + client_id_len:], flags, client)
 
-        # no exceptions means the connection request is OK!
+        # no exceptions means the con request is OK!
         return client, session_present_bit, ReturnCodes.CONNECTION_ACCEPTED
+
+    # returns the flags for a publish message: DUP, QoS, RETAIN
+    def _get_pub_flags(self, packet):
+        dup    = packet[0] & 0b00001000
+        QoS    = (packet[0] & 0b00000110) >> 1   # bit-shifted to map it to range 0-2
+        retain = packet[0] & 0b00000001
+        return {'dup': dup, 'qos': QoS, 'retain': retain}
+
+
+    def _parse_publish(self, packet, msg_len, flags, client):
+
+        if flags['qos'] == 0 and flags['dup'] != 0:
+            raise Exception('DUP MUST BE 0 WHEN QoS is 0!!')
+
+        identifier = None
+
+        # get topic len (2 bytes) and the topic
+        topic_len = struct.unpack('>H', packet[:2])[0]
+        index     = 2 + topic_len
+        topic     = ''.join( [chr(byte) for byte in packet[2:index]] )
+
+        if flags['qos']:
+            # QoS > 0 needs packet identifier
+            identifier = struct.unpack('>H', packet[index:index + 2])[0]
+            index += 2
+
+        # the message is the rest of the packet
+        msg       = packet[index: msg_len]
+        msg       = ''.join( [chr(byte) for byte in msg] )
+
+        return topic, msg, identifier
+
+    def _parse_unsubscribe(self, packet, pkt_len):
+        identifier = struct.unpack('>H', packet[2:4])[0]                        # 2 bytes identifier
+        topic_len = struct.unpack('>H', packet[4:6])[0]                         # 2 bytes topic_len
+        topic     = ''.join( [chr(byte) for byte in packet[6:topic_len + 6]] )  # x bytes topic
+        return identifier, topic
+
+    def _parse_subscribe(self, packet, pkt_len):
+        identifier = struct.unpack('>H', packet[:2])[0]
+        # topic len 2 bytes
+        topic_len = struct.unpack('>H', packet[2:4])[0]
+        topic     = ''.join( [chr(byte) for byte in packet[4:4 + topic_len]] )
+        QoS       = packet[-1]
+
+        return identifier, topic, QoS
 
     # creates a new client object and adds it into the active sessions
     # this also starts a daemon thread on the client obj to check for keepalive-timeout
     def _create_new_session(self, client_id, keep_alive, flags):
-        client = MQTTClient(client_id, keep_alive, flags, self._client_timeout)
+        client = MQTTClient(client_id, keep_alive, flags, self._client_disconnect)
         self._sessions[client_id] = client
         client.start_session()
         return client
 
-
-    def _client_timeout(self, client):
-        self._log.info(f'Client {client} has timed out. Disconnecting')
+    def _client_disconnect(self, client, reason):
+        if reason == MQTTClient.TIMEOUT:
+            self._log.info(f'Client {client.id} has timed out. Disconnecting ...')
+        elif reason == MQTTClient.CLIENT_DISCONNECT:
+            self._log.info(f'Client {client.id} requested disconnect. Disconnecting ...')
+        
         self._disconnect_client(client)
 
 
@@ -427,11 +403,18 @@ class MQTTBroker:
     # all client sessions before exiting the program
     def close(self):
         try:
+            # close the listening server socket
             self._sock.close()
+            # close all the active sessions
+            for client in self._sessions.values():
+                client.stop_session()
             self._sock = None
+
         except:
+            # could be errors when closing, shouldn't be anything bad
             print('__exit__ FAILED!')
             pass
+
         finally:
             # save all sessions before closing!
             with open(os.path.join(self.BASE_DIR, 
@@ -488,7 +471,7 @@ class MQTTBroker:
         pass
 
     def _get_packet_id(self, packet):
-        pass
+        return struct.unpack('>H', packet[:2])
 
     def _get_packet_type(self, packet):
         return packet[0] >> 4
@@ -523,7 +506,6 @@ class MQTTBroker:
 
         return byte
 
-
     def __enter__(self):
         if not self._sock:
             self.start()
@@ -532,7 +514,20 @@ class MQTTBroker:
         self.close()
 
 
-
 if __name__ == "__main__":
-    with MQTTBroker() as broker:
-        pass
+
+    try:
+
+        broker = MQTTBroker()
+        broker.start()
+
+    except KeyboardInterrupt:
+        print('HEY')
+#        broker.close()
+
+    finally:
+        
+        broker.close()
+
+
+    
