@@ -3,3 +3,4 @@ include/
 lib/
 config.json
 mqtt-broker.log
+utils/__pycache__/
