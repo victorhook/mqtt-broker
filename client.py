@@ -88,6 +88,9 @@ class MQTTClient:
 
 
     def _start_keep_alive_timer(self):
+        """ each client-session has it's own thread
+            that is alive as long as the keep-alive isn't reached. """
+
         t1 = time.time()
         # if more than 1.5 times keep-alive has passed, the client must be disconnected
         while not self._stop_flag.is_set() and time.time() - t1 < (self._keep_alive * 1.5):
@@ -100,6 +103,7 @@ class MQTTClient:
             disconnect_reason = self.CLIENT_DISCONNECT
 
         self._client_timed_out(self, disconnect_reason)
+
 
     def add_will_msg(self, topic, msg, QoS):
         self._will_topic  = topic

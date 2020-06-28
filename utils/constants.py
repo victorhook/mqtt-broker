@@ -30,5 +30,6 @@ class ReturnCodes:
     NOT_AUTHORIZED      = 0X05
 
 
+
 ## bits [8-16]
 # Message length 
