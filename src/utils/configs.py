@@ -2,9 +2,12 @@ import json
 import os
 import sys
 
+BASE_DIR    = os.path.dirname(sys.argv[0])
 CONFIG_FILE = 'config.json'
-BASE_DIR    = os.path.join(os.path.dirname(sys.argv[0]), 'etc')
-CONFIG_PATH = os.path.join(BASE_DIR, CONFIG_FILE)
+
+CONFIG_DIR  = os.path.join(BASE_DIR, 'etc')
+LOG_DIR     = os.path.join(BASE_DIR, 'log')
+CONFIG_PATH = os.path.join(CONFIG_DIR, CONFIG_FILE)
 
 def get_configs():
     """ returns configurations from config file """
@@ -23,8 +26,11 @@ def setup():
         4. Max requests waiting on socket
     """
 
-    if not os.path.exists(BASE_DIR):
-        os.mkdir(BASE_DIR)
+    if not os.path.exists(CONFIG_DIR):
+        os.mkdir(CONFIG_DIR)
+
+    if not os.path.exists(LOG_DIR):
+        os.mkdir(LOG_DIR)
 
     print(f'[*]  All configurations are stored in {CONFIG_PATH} as json.\n' \
           f'[*]  you can edit this manually or use \'{os.path.basename(sys.argv[0])} --edit\'')

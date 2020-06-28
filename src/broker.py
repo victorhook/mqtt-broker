@@ -30,7 +30,7 @@ from utils.errors import IDRejectedError
 class MQTTBroker:
 
     BASE_DIR      = os.path.dirname(sys.argv[0])
-    LOG_NAME      = 'mqtt-broker.log'
+    LOG_NAME      = 'log/mqtt-broker.log'
     LOG_PATH      = os.path.join(BASE_DIR, LOG_NAME)
     PROTO_VERSION = 0x04
 
