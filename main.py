@@ -27,3 +27,4 @@ if __name__ == "__main__":
 
     broker = MQTTBroker(ip, port, args.verbose, int(conf['max_requests']))
     broker.start()
+
