@@ -130,8 +130,7 @@ def setup_credentials():
     save_new_credentials(username, password1)
     del username, password1, password2
 
-    print('\n[*]  Credentials saved, you\'re ready to go!')
-    print('[*]  These credentials will now be compared with all incoming messages')
+    print('[*]  These credentials are saved and will now be compared with all incoming messages')
     
 
 ## TODO : delete_user(), add_user(), argparse

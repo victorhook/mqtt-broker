@@ -6,8 +6,8 @@ CONFIG_FILE = 'config.json'
 BASE_DIR    = os.path.join(os.path.dirname(sys.argv[0]), 'etc')
 CONFIG_PATH = os.path.join(BASE_DIR, CONFIG_FILE)
 
-# returns configurations from config file
 def get_configs():
+    """ returns configurations from config file """
     with open(CONFIG_PATH) as f:
         return json.load(f)
 
@@ -16,7 +16,14 @@ def config_exists():
 
 def setup():
 
-    if not config_exists():
+    """ performs a basic config-setup with the following:
+        1. IP address to listen to
+        2. Port to use 
+        3. If we should use credentials
+        4. Max requests waiting on socket
+    """
+
+    if not os.path.exists(BASE_DIR):
         os.mkdir(BASE_DIR)
 
     print(f'[*]  All configurations are stored in {CONFIG_PATH} as json.\n' \
@@ -25,6 +32,10 @@ def setup():
     ip = None
     while not ip:
         ip = input('[*]\n[*]  IP: ')
+
+    port = input('[*]  Port (default 1883): ')
+    if not port.isdigit():
+        port = '1883'
 
     use_credentials = False
     answer = None
@@ -38,6 +49,7 @@ def setup():
 
     config = {}
     config['ip'] = ip
+    config['port'] = port
     config['use_credentials'] = use_credentials
     config['max_requests'] = 20
 
@@ -47,3 +59,5 @@ def setup():
 
     with open(CONFIG_PATH, 'w') as f:
         json.dump(config, f)
+
+    print('[*]  Setup complete, ready to rock! \n\n')
