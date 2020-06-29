@@ -1,6 +1,13 @@
 import subprocess
 import os
 
+"""
+    Helper for rc service.
+    Probably a horrible way to kill a program but
+    this it works. I don't know how to write proper
+    services files for the rc service handler..
+"""
+
 proc = subprocess.Popen(['sockstat'], stdout=subprocess.PIPE) 
 stdout = proc.stdout.read().decode()
 

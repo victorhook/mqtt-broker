@@ -92,9 +92,6 @@ class MQTTBroker:
                 return
 
             self._send_connack(con, session_present, return_code)
-            if client.id in self._sessions:
-                self._client_disconnect(self._sessions[client.id], MQTTClient.EXISTS)
-
 
             # client OK, attach tcp-connection to session
             client.add_connection(con)
@@ -119,6 +116,8 @@ class MQTTBroker:
                             if pkt_type == PacketType.SUBSCRIBE:
                                 identifier, topic, QoS = self._parse_subscribe(data[2:], pkt_len)
                                 client.add_subscription(topic, QoS)
+                                self._sessions[client.id] = client
+
                                 self._log.info(f'New subscription added to client {client.id}.' + \
                                                 f'  Topic: {topic}  QoS: {QoS}')
                                 self._send_suback(con, identifier, QoS)
@@ -159,7 +158,8 @@ class MQTTBroker:
                             elif pkt_type == PacketType.PINGREQ:
                                 self._send_pingresp(con)
                                 threads = threading.enumerate()
-                                print(f'{len(threads)} threads running: {", ".join([t.name for t in threads])}')
+                                print(f'PINGREQ from {client.id}\n \
+                                        {len(threads)} threads running: {", ".join([t.name for t in threads])}')
                                 start += 2                          # increment data indexer
 
 
@@ -188,6 +188,10 @@ class MQTTBroker:
 
                     except socket.timeout:
                         pass
+
+                    except BrokenPipeError:
+                        print('Broken pipe')
+                        self._client_disconnect(client, 4)
 
 
     def _send_pingresp(self, con):
