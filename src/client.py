@@ -16,6 +16,7 @@ class MQTTClient:
 
     TIMEOUT             = 0x01
     CLIENT_DISCONNECT   = 0x02
+    EXISTS              = 0x03
 
     def __init__(self, id, keep_alive, flags, timeout_callback):
         self.id                    = id
@@ -34,6 +35,7 @@ class MQTTClient:
         self._will_retain          = False
         self._stop_flag            = threading.Event()
 
+        print('Keep-alive : %s' % keep_alive)
 
     def publish(self, packet):
         try:
@@ -83,6 +85,7 @@ class MQTTClient:
 
 
     def stop_session(self):
+        print('KILLING!' + self.id)
         self._connection = None
         self._stop_flag.set()
 
@@ -110,4 +113,7 @@ class MQTTClient:
         self._will_msg    = msg
         self._will_QoS    = QoS
         self._will_retain = True
+
+    def __eq__(self, other):
+        return self.id == other.id
 

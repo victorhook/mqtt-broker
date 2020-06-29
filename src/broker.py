@@ -92,6 +92,9 @@ class MQTTBroker:
                 return
 
             self._send_connack(con, session_present, return_code)
+            if client.id in self._sessions:
+                self._client_disconnect(self._sessions[client.id], MQTTClient.EXISTS)
+
 
             # client OK, attach tcp-connection to session
             client.add_connection(con)
@@ -371,8 +374,9 @@ class MQTTBroker:
 
 
     def _disconnect_client(self, client):
-        if client in self._sessions:
+        if client.id in self._sessions:
             self._sessions.pop(client.id)
+            client.stop_session()
 
 
     def _parse_connect_payload(self, packet, flags, client):
