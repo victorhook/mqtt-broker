@@ -12,6 +12,8 @@ class Subscription:
     def __eq__(self, other_topic):
         return self.topic == other_topic
 
+    
+
 class MQTTClient:
 
     TIMEOUT             = 0x01
@@ -55,7 +57,6 @@ class MQTTClient:
 
     def add_connection(self, con):
         self._connection = con
-
 
     def is_alive(self):
         return self._is_alive
@@ -120,3 +121,5 @@ class MQTTClient:
     def __eq__(self, other):
         return self.id == other.id
 
+    def __repr__(self):
+        return self.id

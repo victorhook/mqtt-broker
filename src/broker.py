@@ -78,120 +78,128 @@ class MQTTBroker:
 
     def _handle_request(self, con, addr):
   
-        con.settimeout(2)
+        con.settimeout(5)
         data = con.recv(1024)
-
-        pkt_type, pkt_len = self._parse_header(data)
+        pkt_type, pkt_len, start_byte = self._parse_header(data)
+        print('Total active sessions: %s' % self._sessions)
 
         if pkt_type == PacketType.CONNECT:
             # connect, prepare new sessions?
             try:
-                client, session_present, return_code = self._parse_connect(data[2:], pkt_len)
+                client, session_present, return_code = self._parse_connect(data[start_byte:], pkt_len)
+                # client OK, attach tcp-connection reference to session
+                client.add_connection(con)
+
             except IDRejectedError:
                 self._send_connack(con, 0, ReturnCodes.BAD_ID)
                 return
 
             self._send_connack(con, session_present, return_code)
+            self._log.info(f'New client connected from {addr} as {client.id}')
+            #print(f'New client connected from {addr} as {client.id}')
 
-            # client OK, attach tcp-connection to session
-            client.add_connection(con)
+            try:
+                # each TCP-packet can sometimes contain multiple MQTT packets
+                # because of this, we need to know if there's more data in the packets
+                data = con.recv(1024)
+                while data:
 
-            if client:
-                self._log.info(f'New client connected from {addr} as {client.id}')
-
-                # enter the client loop
-                while client.is_alive():
+                    pkt_type, pkt_len, start_byte = self._parse_header(data)
+                    # these bytes represent the msg-len of the packet
+                    msg_len_bytes = data[1:start_byte]
                     
-                    try:
-                        # each TCP-packet can sometimes contain multiple MQTT packets
-                        # because of this, we need to know if there's more data in the packets
-                        data = con.recv(1024)
-                        start = 0              # indexer for data
-                        more_data = True
 
-                        while more_data:
+                    #print(f'{data}  type: {pkt_type}  len: {pkt_len}')
 
-                            pkt_type, pkt_len = self._parse_header(data)
+                    if pkt_type == PacketType.SUBSCRIBE:
+                        identifier, topic, QoS = self._parse_subscribe(data[start_byte:], pkt_len)
+                        client.add_subscription(topic, QoS)
 
-                            if pkt_type == PacketType.SUBSCRIBE:
-                                identifier, topic, QoS = self._parse_subscribe(data[2:], pkt_len)
-                                client.add_subscription(topic, QoS)
-                                self._sessions[client.id] = client
+                        #print(client.get_subscriptions()[0].topic)
 
-                                self._log.info(f'New subscription added to client {client.id}.' + \
-                                                f'  Topic: {topic}  QoS: {QoS}')
-                                self._send_suback(con, identifier, QoS)
-                                start += 2 + pkt_len         # increment data indexer
+                        self._sessions[client.id] = client
 
-                            elif pkt_type == PacketType.PUBLISH:
-                                
-                                flags = self._get_pub_flags(data)
-                                topic, msg, identifier = self._parse_publish(data[2:],
-                                                            pkt_len, flags, client)
-                                self._log.info(f'Client {client.id} has published a message on topic' + \
-                                                f' {topic}: \'{msg}\'')
+                        self._log.info(f'New subscription added to client {client.id}.' + \
+                                        f'  Topic: {topic}  QoS: {QoS}')
+                        self._send_suback(con, identifier, QoS)
+
+                        start_byte += len(msg_len_bytes) + pkt_len - 1        # increment data indexer'
 
 
-                                # send the messages to all subscribers
-                                subscriptions = self._find_subscriptions(topic)
-                                self._postman.deliver(subscriptions, msg, flags)
+                    elif pkt_type == PacketType.PUBLISH:
+                        
+                        flags = self._get_pub_flags(data)
+                        topic, msg, identifier = self._parse_publish(data[start_byte:],
+                                                    pkt_len, flags, client)
 
-                                if flags['qos'] == 1:
-                                    self._send_puback(con, identifier)
+                        #pkt_len_bytes = self._parse_publish_pkt_len(data, pkt_len)
 
-                                elif flags['qos'] == 2:
-                                    self._send_pubrec(con, identifier)
-                                    data = con.recv(1024)
-                                    pkt_type = data[0]
-                                    if pkt_type == PacketType.PUBREL:
-                                        self._send_pubcomp(con, identifier)
+                        self._log.info(f'Client {client.id} has published a message on topic' + \
+                                        f' {topic}: \'{msg}\'')
 
-                                start += 2 + pkt_len                # increment data indexer
+                        subscriptions = self._find_subscriptions(topic)
 
 
-                            # the disconnect packets are usually packet in the same TCP-payload
-                            # as the PUBLISH packets, but this should detect just in case
-                            elif pkt_type == PacketType.DISCONNECT:
-                                client.stop_session()
-                                start += 2                          # increment data indexer
+                        # start_byte is the number of bytes required by the msg-len field
+                        self._postman.deliver(subscriptions, msg, flags, msg_len_bytes)
 
-                            elif pkt_type == PacketType.PINGREQ:
-                                self._send_pingresp(con)
-                                threads = threading.enumerate()
-                                print(f'PINGREQ from {client.id}\n \
-                                        {len(threads)} threads running: {", ".join([t.name for t in threads])}')
-                                start += 2                          # increment data indexer
+                        if flags['qos'] == 1:
+                            self._send_puback(con, identifier)
 
+                        elif flags['qos'] == 2:
+                            self._send_pubrec(con, identifier)
+                            data = con.recv(1024)
+                            pkt_type = data[0]
+                            if pkt_type == PacketType.PUBREL:
+                                self._send_pubcomp(con, identifier)
 
-                            # UNSUB packet uses the RESERVED bits, which is why we need the whole byte
-                            elif data[start] == PacketType.UNSUBSCRIBE:
-                                # according to docs, we must close connection if bits [3-0] is wrong
-                                if data[start] & 0x0f != 0b0010:
-                                    client.stop_session()
-                                    self._log.info(f'Bad packet format from client {client.id}, closing socket!')
-                                
-                                pkt_len = self._get_packet_len(data)
-                                identifier, topic, msg = self._parse_unsubscribe(data, pkt_len)
-                                client.delete_topic(topic)
-
-                                self._send_unsuback(con, identifier)
-
-                                data += pkt_len + 2
+                        start_byte += len(msg_len_bytes) + pkt_len - 1                # increment data indexer
 
 
-                            data = data[start:]
-                            more_data = len(data) > 0
+                    # the disconnect packets are usually packet in the same TCP-payload
+                    # as the PUBLISH packets, but this should detect just in case
+                    elif pkt_type == PacketType.DISCONNECT:
+                        client.stop_session()
+                        start_byte += len(msg_len_bytes)                          # increment data indexer
+
+                    elif pkt_type == PacketType.PINGREQ:
+                        self._send_pingresp(con)
+                        threads = threading.enumerate()
+                        print(f'PINGREQ from {client.id}\n \
+                                {len(threads)} threads running: {", ".join([t.name for t in threads])}')
+                        start_byte += len(msg_len_bytes) - 1                          # increment data indexer
 
 
-                    except IndexError:
-                        self._log.info(f'Bad packet format for client {client.id}')
+                    # UNSUB packet uses the RESERVED bits, which is why we need the whole byte
+                    elif data[start_byte] == PacketType.UNSUBSCRIBE:
+                        # according to docs, we must close connection if bits [3-0] is wrong
+                        if data[start_byte] & 0x0f != 0b0010:
+                            client.stop_session()
+                            self._log.info(f'Bad packet format from client {client.id}, closing socket!')
+                        
+                        pkt_len = self._get_packet_len(data)
+                        identifier, topic, msg = self._parse_unsubscribe(data, pkt_len)
+                        client.delete_topic(topic)
 
-                    except socket.timeout:
-                        pass
+                        self._send_unsuback(con, identifier)
 
-                    except BrokenPipeError:
-                        print('Broken pipe')
-                        self._client_disconnect(client, 4)
+                        data += pkt_len + len(msg_len_bytes) - 1
+
+
+                    data = data[start_byte:]
+
+
+            except IndexError as e:
+                #self._log.info(f'Bad packet format for client {client.id}')
+                import traceback
+                traceback.print_exc()
+
+            except socket.timeout:
+                pass
+
+#            except BrokenPipeError as e:
+ #               print('Broken pipe %s'%  client.id)
+  #              self._client_disconnect(client, 4)
 
 
     def _send_pingresp(self, con):
@@ -201,8 +209,9 @@ class MQTTBroker:
     def _find_subscriptions(self, topic):
         subscriptions = []
         for client in self._sessions.values():
-            for sub in client.get_subscriptions():
 
+            for sub in client.get_subscriptions():
+                
                 match = True
 
                 topics = topic.split('/')
@@ -212,6 +221,7 @@ class MQTTBroker:
                     match = False
                 else:
                     for t1, t2 in list(zip(sub_topics, topics)):
+                        
                         if t1 == '+':
                             print('found +!')
                             continue
@@ -259,6 +269,7 @@ class MQTTBroker:
         
 
     def _parse_connect(self, packet, pkt_len):
+
         # get length of the protocol name
         proto_len  = struct.unpack('>H', packet[:2])[0]
         # get the protocol name (should be 'MQTT')
@@ -278,6 +289,7 @@ class MQTTBroker:
 
         if flags['reserved']:
             # reserved bit MUST be 0, or we disconnect client
+            # TODO this
             pass
 
         # keep-alive is stored as 2 bytes, in seconds
@@ -333,6 +345,7 @@ class MQTTBroker:
         topic_len = struct.unpack('>H', packet[:2])[0]
         index     = 2 + topic_len
         topic     = ''.join( [chr(byte) for byte in packet[2:index]] )
+
 
         if flags['qos']:
             # QoS > 0 needs packet identifier
@@ -464,8 +477,8 @@ class MQTTBroker:
 
     def _parse_header(self, packet):
         pkt_type = packet[0] >> 4
-        pkt_len = self._get_packet_len(packet)
-        return pkt_type, pkt_len
+        pkt_len, start_byte = self._get_packet_len(packet)
+        return pkt_type, pkt_len, start_byte
 
 
     def _get_payload(self, packet):
@@ -479,6 +492,44 @@ class MQTTBroker:
 
     def _get_packet_len(self, packet):
 
+        multiplier = 1
+        i = 1
+        length = 0
+        #enc_byte = 0 
+
+        """
+        enc_byte = packet[i]
+        i += 1
+        length += (enc_byte & 127) * multiplier
+        multiplier *= 128
+        """
+
+        enc_byte = 128
+
+        while (enc_byte & 128) != 0:
+            enc_byte = packet[i]
+            i += 1
+
+            length += (enc_byte & 127) * multiplier
+            multiplier *= 128
+
+        start_byte = self._get_pkt_len_bytes(length)
+
+        return length, start_byte
+
+
+    """ returns the number of bytes that the MSG-len requries """
+    def _get_pkt_len_bytes(self, encoded_length):
+        if encoded_length < 128:
+            byte = 2
+        elif encoded_length < 16384:
+            byte = 3
+        elif encoded_length < 2097152:
+            byte = 4
+        return byte
+
+
+        """
         x = byte = 1
 
         while x:
@@ -506,6 +557,7 @@ class MQTTBroker:
 
 
         return byte
+        """
 
     def __enter__(self):
         if not self._sock:
